@@ -24,11 +24,23 @@ CACHE_TTL_SECONDS = 300  # 5 Minuten Cache
 MAX_ARTICLES_PER_FETCH = 20
 
 RSS_FEEDS = [
+    # Überregional
     "https://www.tagesschau.de/xml/rss2/",
     "https://www.spiegel.de/schlagzeilen/index.rss",
     "https://www.zeit.de/news/index",
-    "https://www.heise.de/rss/heise-atom.xml",
     "https://rss.dw.com/xml/rss-de-all",
+    # Tech & Wissenschaft
+    "https://www.heise.de/rss/heise-atom.xml",
+    "https://www.golem.de/rss.php?feed=RSS2.0",
+    # Wirtschaft
+    "https://www.handelsblatt.com/contentexport/feed/top-themen/",
+    "https://www.manager-magazin.de/politik/index.rss",
+    # International (deutsch)
+    "https://www.nzz.ch/recent.rss",
+    "https://derstandard.at/rss",
+    # Öffentlich-Rechtlich
+    "https://www.zdf.de/rss/zdf/nachrichten",
+    "https://www.deutschlandfunk.de/nachrichten-100.rss",
 ]
 
 # --- Rate Limiting ---
