@@ -19,6 +19,7 @@ load_dotenv()
 
 # --- Config ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 CACHE_TTL_SECONDS = 300  # 5 Minuten Cache
 MAX_ARTICLES_PER_FETCH = 20
 
@@ -121,7 +122,7 @@ Antworte als JSON-Array mit Objekten: {{"headline": "...", "text": "...", "sourc
 Gib NUR das JSON-Array zurück, nichts anderes."""
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=ANTHROPIC_MODEL,
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
