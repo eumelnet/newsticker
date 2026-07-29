@@ -19,7 +19,7 @@ load_dotenv()
 
 # --- Config ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 CACHE_TTL_SECONDS = 300  # 5 Minuten Cache
 MAX_ARTICLES_PER_FETCH = 20
 
@@ -147,8 +147,13 @@ async def fetch_and_process_news() -> list:
 
 
 # --- Routes ---
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def index(request: Request):
     with open("static/index.html", "r") as f:
         return HTMLResponse(content=f.read())
