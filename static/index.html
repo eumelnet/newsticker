@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Newsticker - Fakten, keine Spekulation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid #222;
+            padding-bottom: 1rem;
+        }
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 300;
+            letter-spacing: 0.1em;
+            color: #fff;
+        }
+        .subtitle {
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 0.5rem;
+        }
+        .meta {
+            font-size: 0.75rem;
+            color: #555;
+            margin-top: 0.5rem;
+        }
+        #news-container {
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        .news-item {
+            border-left: 3px solid #2a6;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1.5rem;
+            background: #111;
+            border-radius: 0 4px 4px 0;
+            transition: border-color 0.2s;
+        }
+        .news-item:hover { border-color: #4c8; }
+        .news-item h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .news-item p {
+            font-size: 0.9rem;
+            line-height: 1.5;
+            color: #bbb;
+        }
+        .news-item .source {
+            font-size: 0.75rem;
+            color: #666;
+            margin-top: 0.5rem;
+        }
+        .news-item .source a {
+            color: #4a9;
+            text-decoration: none;
+        }
+        .news-item .source a:hover { text-decoration: underline; }
+        .loading {
+            text-align: center;
+            color: #555;
+            padding: 3rem;
+        }
+        .error {
+            text-align: center;
+            color: #a44;
+            padding: 2rem;
+        }
+        .refresh-btn {
+            display: block;
+            margin: 2rem auto;
+            padding: 0.6rem 1.5rem;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #aaa;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .refresh-btn:hover { border-color: #4a9; color: #fff; }
+        .refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>NEWSTICKER</h1>
+        <p class="subtitle">Nur Fakten. Keine Spekulation. Keine Meinung.</p>
+        <p class="meta" id="meta"></p>
+    </header>
+    <div id="news-container">
+        <p class="loading">Nachrichten werden geladen...</p>
+    </div>
+    <button class="refresh-btn" id="refresh-btn" onclick="loadNews()">Aktualisieren</button>
+
+    <script>
+        async function loadNews() {
+            const container = document.getElementById('news-container');
+            const btn = document.getElementById('refresh-btn');
+            const meta = document.getElementById('meta');
+            btn.disabled = true;
+
+            try {
+                const resp = await fetch('/api/news');
+                if (resp.status === 429) {
+                    container.innerHTML = '<p class="error">Zu viele Anfragen. Bitte warte einen Moment.</p>';
+                    return;
+                }
+                const data = await resp.json();
+
+                if (!data.news || data.news.length === 0) {
+                    container.innerHTML = '<p class="loading">Keine Nachrichten verfügbar.</p>';
+                    return;
+                }
+
+                container.innerHTML = data.news.map(item => `
+                    <article class="news-item">
+                        <h2>${esc(item.headline)}</h2>
+                        <p>${esc(item.text)}</p>
+                        <p class="source">${esc(item.source)} &mdash; <a href="${esc(item.link)}" target="_blank" rel="noopener">Quelle</a></p>
+                    </article>
+                `).join('');
+
+                meta.textContent = data.last_update
+                    ? `Letzte Aktualisierung: ${new Date(data.last_update).toLocaleTimeString('de-DE')} · Nächste in ${data.next_update_in}s`
+                    : '';
+            } catch (e) {
+                container.innerHTML = '<p class="error">Fehler beim Laden der Nachrichten.</p>';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function esc(s) {
+            if (!s) return '';
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        loadNews();
+    </script>
+</body>
+</html>
