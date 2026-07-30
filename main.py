@@ -2,6 +2,7 @@ import os
 import time
 import json
 import asyncio
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -14,16 +15,18 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from contextlib import asynccontextmanager
 
 load_dotenv()
+logger = logging.getLogger("newsticker")
 
 # --- Config ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 CACHE_TTL_SECONDS = 300  # 5 Minuten Cache
-ARTICLES_PER_SOURCE = 3  # Max Artikel pro Quelle (verhindert Einseitigkeit)
-BATCH_SIZE = 8  # Artikel pro KI-Batch
-PAGE_SIZE = 5  # Artikel pro Seite an Frontend
+ARTICLES_PER_SOURCE = 3
+BATCH_SIZE = 8
+PAGE_SIZE = 5
 
 RSS_FEEDS = [
     # Öffentlich-Rechtlich
@@ -49,9 +52,81 @@ RSS_FEEDS = [
     "https://derstandard.at/rss",
 ]
 
-# --- Rate Limiting ---
+
+# --- Cache ---
+class NewsCache:
+    def __init__(self):
+        self.articles: list = []
+        self.last_update: float = 0
+        self.updating: bool = False
+        self._lock = asyncio.Lock()
+
+    def is_stale(self) -> bool:
+        return (time.time() - self.last_update) >= CACHE_TTL_SECONDS
+
+    def get_page(self, page: int) -> list:
+        start = page * PAGE_SIZE
+        return self.articles[start:start + PAGE_SIZE]
+
+    @property
+    def total_pages(self) -> int:
+        if not self.articles:
+            return 0
+        return -(-len(self.articles) // PAGE_SIZE)
+
+    async def update(self):
+        """Run update in background. Never blocks requests."""
+        if self.updating:
+            return
+        async with self._lock:
+            if self.updating or not self.is_stale():
+                return
+            self.updating = True
+        try:
+            logger.info("Starting news update...")
+            new_articles = await fetch_and_process_news()
+            if new_articles:  # Only replace if we got results
+                self.articles = new_articles
+                self.last_update = time.time()
+                logger.info(f"News updated: {len(new_articles)} articles")
+            else:
+                logger.warning("Update returned no articles, keeping old data")
+                # Extend TTL to avoid hammering on errors
+                if self.articles:
+                    self.last_update = time.time()
+        except Exception as e:
+            logger.error(f"News update failed: {e}")
+            # Keep old data, extend TTL
+            if self.articles:
+                self.last_update = time.time()
+        finally:
+            self.updating = False
+
+
+cache = NewsCache()
+
+
+# --- Background updater ---
+async def periodic_update():
+    """Runs forever, updates cache every CACHE_TTL_SECONDS."""
+    # Initial load on startup
+    await cache.update()
+    while True:
+        await asyncio.sleep(CACHE_TTL_SECONDS)
+        await cache.update()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start background updater on startup."""
+    task = asyncio.create_task(periodic_update())
+    yield
+    task.cancel()
+
+
+# --- App ---
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Newsticker")
+app = FastAPI(title="Newsticker", lifespan=lifespan)
 app.state.limiter = limiter
 
 
@@ -61,46 +136,6 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
         status_code=429,
         content={"error": "Zu viele Anfragen. Bitte warte einen Moment."},
     )
-
-
-# --- Cache ---
-class NewsCache:
-    def __init__(self):
-        self.articles: list = []  # Processed articles
-        self.last_update: float = 0
-        self.lock = asyncio.Lock()
-        self.updating: bool = False
-
-    def is_valid(self) -> bool:
-        return len(self.articles) > 0 and (time.time() - self.last_update) < CACHE_TTL_SECONDS
-
-    def get_page(self, page: int) -> list:
-        start = page * PAGE_SIZE
-        end = start + PAGE_SIZE
-        return self.articles[start:end]
-
-    @property
-    def total_pages(self) -> int:
-        return max(1, -(-len(self.articles) // PAGE_SIZE))  # ceil division
-
-    async def ensure_fresh(self):
-        """Trigger background update if cache is stale."""
-        if not self.is_valid() and not self.updating:
-            asyncio.create_task(self._update())
-
-    async def _update(self):
-        async with self.lock:
-            if self.is_valid():
-                return
-            self.updating = True
-            try:
-                self.articles = await fetch_and_process_news()
-                self.last_update = time.time()
-            finally:
-                self.updating = False
-
-
-cache = NewsCache()
 
 
 # --- News Fetching ---
@@ -120,7 +155,8 @@ async def fetch_single_feed(client: httpx.AsyncClient, feed_url: str) -> list[di
                 "published": entry.get("published", ""),
             })
         return articles
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Feed fetch failed for {feed_url}: {e}")
         return []
 
 
@@ -130,7 +166,6 @@ async def fetch_rss_feeds() -> list[dict]:
         tasks = [fetch_single_feed(client, url) for url in RSS_FEEDS]
         results = await asyncio.gather(*tasks)
 
-    # Flatten and interleave sources for diversity
     all_articles = []
     for feed_articles in results:
         all_articles.extend(feed_articles)
@@ -139,7 +174,7 @@ async def fetch_rss_feeds() -> list[dict]:
 
 # --- AI Processing ---
 async def process_batch(client: Anthropic, articles: list[dict]) -> list[dict]:
-    """Process a batch of articles with Claude."""
+    """Process a batch of articles with Claude in a thread (sync SDK)."""
     if not articles:
         return []
 
@@ -165,11 +200,16 @@ AUFGABE:
 Antworte als JSON-Array mit Objekten: {{"headline": "...", "text": "...", "source": "...", "link": "..."}}
 Gib NUR das JSON-Array zurück, nichts anderes."""
 
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    def _call_claude():
+        return client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+    # Run sync Claude SDK in thread pool so it doesn't block the event loop
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(None, _call_claude)
 
     try:
         content = response.content[0].text.strip()
@@ -185,13 +225,18 @@ async def fetch_and_process_news() -> list:
     articles = await fetch_rss_feeds()
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # Process in batches for faster first results
-    all_processed = []
+    # Process batches concurrently
+    tasks = []
     for i in range(0, len(articles), BATCH_SIZE):
         batch = articles[i:i + BATCH_SIZE]
-        processed = await process_batch(client, batch)
-        all_processed.extend(processed)
+        tasks.append(process_batch(client, batch))
 
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_processed = []
+    for result in results:
+        if isinstance(result, list):
+            all_processed.extend(result)
     return all_processed
 
 
@@ -211,18 +256,15 @@ async def index(request: Request):
 @app.get("/api/news")
 @limiter.limit("20/minute")
 async def get_news(request: Request, page: int = Query(default=0, ge=0)):
-    # First request triggers update if needed
-    if not cache.is_valid():
-        await cache._update()
-
     news = cache.get_page(page)
     return {
         "news": news,
         "page": page,
         "total_pages": cache.total_pages,
-        "has_more": page < cache.total_pages - 1,
+        "has_more": page < cache.total_pages - 1 if cache.total_pages > 0 else False,
+        "updating": cache.updating,
         "last_update": datetime.fromtimestamp(cache.last_update).isoformat() if cache.last_update else None,
-        "next_update_in": max(0, int(CACHE_TTL_SECONDS - (time.time() - cache.last_update))),
+        "next_update_in": max(0, int(CACHE_TTL_SECONDS - (time.time() - cache.last_update))) if cache.last_update else None,
     }
 
 

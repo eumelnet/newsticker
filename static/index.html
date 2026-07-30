@@ -114,6 +114,7 @@
         let currentPage = 0;
         let loading = false;
         let allLoaded = false;
+        let waitingForData = false;
 
         const container = document.getElementById('news-container');
         const status = document.getElementById('status');
@@ -122,7 +123,6 @@
         async function loadPage() {
             if (loading || allLoaded) return;
             loading = true;
-            status.innerHTML = '<span class="spinner"></span>Laden...';
             status.style.display = 'block';
 
             try {
@@ -134,9 +134,24 @@
                 }
                 const data = await resp.json();
 
+                // Backend is still loading initial data
+                if (data.updating && (!data.news || data.news.length === 0)) {
+                    status.innerHTML = '<span class="spinner"></span>Nachrichten werden im Hintergrund geladen...';
+                    loading = false;
+                    waitingForData = true;
+                    setTimeout(loadPage, 3000);  // Retry in 3s
+                    return;
+                }
+
+                waitingForData = false;
+
                 if (!data.news || data.news.length === 0) {
-                    allLoaded = true;
-                    status.innerHTML = 'Alle Nachrichten geladen.';
+                    if (currentPage === 0) {
+                        status.innerHTML = 'Noch keine Nachrichten verfügbar.';
+                    } else {
+                        allLoaded = true;
+                        status.innerHTML = 'Alle Nachrichten geladen.';
+                    }
                     return;
                 }
 
@@ -153,7 +168,8 @@
                 });
 
                 if (data.last_update) {
-                    meta.textContent = `Letzte Aktualisierung: ${new Date(data.last_update).toLocaleTimeString('de-DE')} · Cache: ${data.next_update_in}s`;
+                    const updateInfo = data.updating ? ' (aktualisiert...)' : '';
+                    meta.textContent = `Letzte Aktualisierung: ${new Date(data.last_update).toLocaleTimeString('de-DE')}${updateInfo}`;
                 }
 
                 if (!data.has_more) {
@@ -161,10 +177,12 @@
                     status.innerHTML = 'Alle Nachrichten geladen.';
                 } else {
                     currentPage++;
-                    status.style.display = 'none';
+                    status.innerHTML = '<span class="spinner"></span>';
                 }
             } catch (e) {
-                status.innerHTML = '<span class="error">Fehler beim Laden.</span>';
+                status.innerHTML = '<span class="error">Verbindungsfehler. Erneuter Versuch...</span>';
+                setTimeout(() => { loading = false; loadPage(); }, 5000);
+                return;
             } finally {
                 loading = false;
             }
@@ -179,7 +197,7 @@
 
         // Infinite scroll with IntersectionObserver
         const observer = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting && !loading && !allLoaded) {
+            if (entries[0].isIntersecting && !loading && !allLoaded && !waitingForData) {
                 loadPage();
             }
         }, { rootMargin: '200px' });
