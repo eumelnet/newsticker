@@ -24,9 +24,9 @@ logger = logging.getLogger("newsticker")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 CACHE_TTL_SECONDS = 300  # 5 Minuten Cache
-ARTICLES_PER_SOURCE = 3
-BATCH_SIZE = 8
-PAGE_SIZE = 5
+ARTICLES_PER_SOURCE = int(os.getenv("ARTICLES_PER_SOURCE", "8"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
+PAGE_SIZE = int(os.getenv("PAGE_SIZE", "5"))
 
 RSS_FEEDS = [
     # Öffentlich-Rechtlich
