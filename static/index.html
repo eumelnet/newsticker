@@ -46,6 +46,8 @@
             background: #111;
             border-radius: 0 4px 4px 0;
             transition: border-color 0.2s;
+            opacity: 0;
+            animation: fadeIn 0.4s ease forwards;
         }
         .news-item:hover { border-color: #4c8; }
         .news-item h2 {
@@ -69,29 +71,33 @@
             text-decoration: none;
         }
         .news-item .source a:hover { text-decoration: underline; }
-        .loading {
+        .loading, .end-message {
             text-align: center;
             color: #555;
-            padding: 3rem;
+            padding: 2rem;
+            font-size: 0.85rem;
         }
         .error {
             text-align: center;
             color: #a44;
             padding: 2rem;
         }
-        .refresh-btn {
-            display: block;
-            margin: 2rem auto;
-            padding: 0.6rem 1.5rem;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            color: #aaa;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.85rem;
+        #scroll-sentinel {
+            height: 1px;
         }
-        .refresh-btn:hover { border-color: #4a9; color: #fff; }
-        .refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #333;
+            border-top-color: #4a9;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeIn { to { opacity: 1; } }
     </style>
 </head>
 <body>
@@ -100,46 +106,67 @@
         <p class="subtitle">Nur Fakten. Keine Spekulation. Keine Meinung.</p>
         <p class="meta" id="meta"></p>
     </header>
-    <div id="news-container">
-        <p class="loading">Nachrichten werden geladen...</p>
-    </div>
-    <button class="refresh-btn" id="refresh-btn" onclick="loadNews()">Aktualisieren</button>
+    <div id="news-container"></div>
+    <div id="scroll-sentinel"></div>
+    <div id="status" class="loading"><span class="spinner"></span>Nachrichten werden geladen...</div>
 
     <script>
-        async function loadNews() {
-            const container = document.getElementById('news-container');
-            const btn = document.getElementById('refresh-btn');
-            const meta = document.getElementById('meta');
-            btn.disabled = true;
+        let currentPage = 0;
+        let loading = false;
+        let allLoaded = false;
+
+        const container = document.getElementById('news-container');
+        const status = document.getElementById('status');
+        const meta = document.getElementById('meta');
+
+        async function loadPage() {
+            if (loading || allLoaded) return;
+            loading = true;
+            status.innerHTML = '<span class="spinner"></span>Laden...';
+            status.style.display = 'block';
 
             try {
-                const resp = await fetch('/api/news');
+                const resp = await fetch(`/api/news?page=${currentPage}`);
                 if (resp.status === 429) {
-                    container.innerHTML = '<p class="error">Zu viele Anfragen. Bitte warte einen Moment.</p>';
+                    status.innerHTML = '<span class="error">Zu viele Anfragen. Bitte warte einen Moment.</span>';
+                    loading = false;
                     return;
                 }
                 const data = await resp.json();
 
                 if (!data.news || data.news.length === 0) {
-                    container.innerHTML = '<p class="loading">Keine Nachrichten verfügbar.</p>';
+                    allLoaded = true;
+                    status.innerHTML = 'Alle Nachrichten geladen.';
                     return;
                 }
 
-                container.innerHTML = data.news.map(item => `
-                    <article class="news-item">
+                data.news.forEach((item, i) => {
+                    const article = document.createElement('article');
+                    article.className = 'news-item';
+                    article.style.animationDelay = `${i * 0.08}s`;
+                    article.innerHTML = `
                         <h2>${esc(item.headline)}</h2>
                         <p>${esc(item.text)}</p>
                         <p class="source">${esc(item.source)} &mdash; <a href="${esc(item.link)}" target="_blank" rel="noopener">Quelle</a></p>
-                    </article>
-                `).join('');
+                    `;
+                    container.appendChild(article);
+                });
 
-                meta.textContent = data.last_update
-                    ? `Letzte Aktualisierung: ${new Date(data.last_update).toLocaleTimeString('de-DE')} · Nächste in ${data.next_update_in}s`
-                    : '';
+                if (data.last_update) {
+                    meta.textContent = `Letzte Aktualisierung: ${new Date(data.last_update).toLocaleTimeString('de-DE')} · Cache: ${data.next_update_in}s`;
+                }
+
+                if (!data.has_more) {
+                    allLoaded = true;
+                    status.innerHTML = 'Alle Nachrichten geladen.';
+                } else {
+                    currentPage++;
+                    status.style.display = 'none';
+                }
             } catch (e) {
-                container.innerHTML = '<p class="error">Fehler beim Laden der Nachrichten.</p>';
+                status.innerHTML = '<span class="error">Fehler beim Laden.</span>';
             } finally {
-                btn.disabled = false;
+                loading = false;
             }
         }
 
@@ -150,7 +177,17 @@
             return d.innerHTML;
         }
 
-        loadNews();
+        // Infinite scroll with IntersectionObserver
+        const observer = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting && !loading && !allLoaded) {
+                loadPage();
+            }
+        }, { rootMargin: '200px' });
+
+        observer.observe(document.getElementById('scroll-sentinel'));
+
+        // Initial load
+        loadPage();
     </script>
 </body>
 </html>
