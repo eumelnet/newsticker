@@ -8,7 +8,7 @@ from typing import Optional
 
 import feedparser
 import httpx
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -36,12 +36,14 @@ RSS_FEEDS = [
     # Überregional
     "https://www.zeit.de/news/index",
     "https://rss.dw.com/xml/rss-de-all",
-    # Alternative Medien
-    "https://www.nius.de/feed",
-    "https://www.weltwoche.ch/feed",
+    "https://www.welt.de/feeds/latest.rss",
+    # Alternative / Meinungsvielfalt
     "https://reitschuster.de/feed/",
     "https://www.tichyseinblick.de/feed/",
-    "https://www.bild.de/rssfeeds/vw-alles/vw-alles-26970192,sort=1,view=rss2.bild.xml",
+    "https://jungefreiheit.de/feed/",
+    "https://www.cicero.de/rss.xml",
+    "https://www.epochtimes.de/feed",
+    "https://www.berliner-zeitung.de/feed.xml",
     # Wirtschaft
     "https://www.handelsblatt.com/contentexport/feed/top-themen/",
     # Tech & Wissenschaft
@@ -173,8 +175,8 @@ async def fetch_rss_feeds() -> list[dict]:
 
 
 # --- AI Processing ---
-async def process_batch(client: Anthropic, articles: list[dict]) -> list[dict]:
-    """Process a batch of articles with Claude in a thread (sync SDK)."""
+async def process_batch(client: AsyncAnthropic, articles: list[dict]) -> list[dict]:
+    """Process a batch of articles with Claude."""
     if not articles:
         return []
 
@@ -200,16 +202,11 @@ AUFGABE:
 Antworte als JSON-Array mit Objekten: {{"headline": "...", "text": "...", "source": "...", "link": "..."}}
 Gib NUR das JSON-Array zurück, nichts anderes."""
 
-    def _call_claude():
-        return client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-    # Run sync Claude SDK in thread pool so it doesn't block the event loop
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(None, _call_claude)
+    response = await client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
     try:
         content = response.content[0].text.strip()
@@ -223,7 +220,7 @@ Gib NUR das JSON-Array zurück, nichts anderes."""
 async def fetch_and_process_news() -> list:
     """Full pipeline: fetch RSS -> filter with Claude in batches."""
     articles = await fetch_rss_feeds()
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     # Process batches concurrently
     tasks = []
