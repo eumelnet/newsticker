@@ -23,7 +23,7 @@ logger = logging.getLogger("newsticker")
 # --- Config ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
-CACHE_TTL_SECONDS = 300  # 5 Minuten Cache
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "1800"))  # 30 Minuten
 ARTICLES_PER_SOURCE = int(os.getenv("ARTICLES_PER_SOURCE", "8"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "5"))
@@ -61,6 +61,7 @@ class NewsCache:
         self.articles: list = []
         self.last_update: float = 0
         self.updating: bool = False
+        self.content_hash: str = ""
         self._lock = asyncio.Lock()
 
     def is_stale(self) -> bool:
@@ -85,20 +86,32 @@ class NewsCache:
                 return
             self.updating = True
         try:
-            logger.info("Starting news update...")
-            new_articles = await fetch_and_process_news()
-            if new_articles:  # Only replace if we got results
-                self.articles = new_articles
+            logger.info("Fetching RSS feeds...")
+            articles = await fetch_rss_feeds()
+
+            # Hash-Check: skip Claude if content hasn't changed
+            import hashlib
+            new_hash = hashlib.md5(
+                json.dumps([a["title"] for a in articles], sort_keys=True).encode()
+            ).hexdigest()
+
+            if new_hash == self.content_hash and self.articles:
+                logger.info("RSS content unchanged, skipping Claude API call")
                 self.last_update = time.time()
-                logger.info(f"News updated: {len(new_articles)} articles")
             else:
-                logger.warning("Update returned no articles, keeping old data")
-                # Extend TTL to avoid hammering on errors
-                if self.articles:
+                logger.info(f"RSS content changed, processing {len(articles)} articles with Claude...")
+                new_articles = await process_articles_with_claude(articles)
+                if new_articles:
+                    self.articles = new_articles
+                    self.content_hash = new_hash
                     self.last_update = time.time()
+                    logger.info(f"News updated: {len(new_articles)} articles")
+                else:
+                    logger.warning("Claude returned no articles, keeping old data")
+                    if self.articles:
+                        self.last_update = time.time()
         except Exception as e:
             logger.error(f"News update failed: {e}")
-            # Keep old data, extend TTL
             if self.articles:
                 self.last_update = time.time()
         finally:
@@ -217,9 +230,8 @@ Gib NUR das JSON-Array zurück, nichts anderes."""
         return []
 
 
-async def fetch_and_process_news() -> list:
-    """Full pipeline: fetch RSS -> filter with Claude in batches."""
-    articles = await fetch_rss_feeds()
+async def process_articles_with_claude(articles: list[dict]) -> list:
+    """Filter with Claude in batches."""
     client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
     # Process batches concurrently
