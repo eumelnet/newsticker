@@ -8,7 +8,6 @@ from typing import Optional
 
 import feedparser
 import httpx
-from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -21,8 +20,8 @@ load_dotenv()
 logger = logging.getLogger("newsticker")
 
 # --- Config ---
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "1800"))  # 30 Minuten
 ARTICLES_PER_SOURCE = int(os.getenv("ARTICLES_PER_SOURCE", "8"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "15"))
@@ -187,22 +186,8 @@ async def fetch_rss_feeds() -> list[dict]:
     return all_articles
 
 
-# --- AI Processing ---
-async def process_batch(client: AsyncAnthropic, articles: list[dict]) -> list[dict]:
-    """Process a batch of articles with Claude."""
-    if not articles:
-        return []
-
-    articles_text = "\n\n---\n\n".join(
-        f"TITEL: {a['title']}\nZUSAMMENFASSUNG: {a['summary']}\nQUELLE: {a['source']}\nLINK: {a['link']}"
-        for a in articles
-    )
-
-    prompt = f"""Du bist ein Nachrichtenredakteur. Hier sind aktuelle Nachrichtenartikel:
-
-{articles_text}
-
-AUFGABE:
+# --- AI Processing (Ollama) ---
+SYSTEM_PROMPT = """Du bist ein Nachrichtenredakteur. Deine Aufgabe:
 1. ENTFERNE alle Artikel die Spekulation enthalten (Konjunktiv wie "könnte", "dürfte", "würde", Phrasen wie "es wird vermutet", "möglicherweise")
 2. ENTFERNE alle Meinungsartikel und Einordnungen
 3. ENTFERNE Duplikate (gleiche Nachricht aus verschiedenen Quellen -> nur einmal, bevorzuge die detailliertere Version)
@@ -212,40 +197,63 @@ AUFGABE:
    - Kurz und prägnant (max 2 Sätze pro Nachricht)
    - Nur verifizierte Fakten
 
-Antworte als JSON-Array mit Objekten: {{"headline": "...", "text": "...", "source": "...", "link": "..."}}
-Gib NUR das JSON-Array zurück, nichts anderes."""
+Antworte IMMER als JSON-Array mit Objekten: {"headline": "...", "text": "...", "source": "...", "link": "..."}
+Gib NUR das JSON-Array zurück, nichts anderes. Kein Markdown, kein Text drumherum."""
 
-    response = await client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
+
+async def process_batch(http_client: httpx.AsyncClient, articles: list[dict]) -> list[dict]:
+    """Process a batch of articles with Ollama."""
+    if not articles:
+        return []
+
+    articles_text = "\n\n---\n\n".join(
+        f"TITEL: {a['title']}\nZUSAMMENFASSUNG: {a['summary']}\nQUELLE: {a['source']}\nLINK: {a['link']}"
+        for a in articles
     )
 
     try:
-        content = response.content[0].text.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        return json.loads(content)
-    except (json.JSONDecodeError, IndexError):
+        response = await http_client.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Hier sind die Artikel:\n\n{articles_text}"},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.3},
+                "format": "json",
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = data["message"]["content"].strip()
+
+        # Parse JSON - handle both array and wrapped object
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            # Some models wrap in {"articles": [...]}
+            for key in parsed:
+                if isinstance(parsed[key], list):
+                    return parsed[key]
+            return []
+        return parsed if isinstance(parsed, list) else []
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Ollama batch processing failed: {e}")
         return []
 
 
 async def process_articles_with_claude(articles: list[dict]) -> list:
-    """Filter with Claude in batches."""
-    client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    """Filter with Ollama in batches."""
+    async with httpx.AsyncClient() as http_client:
+        # Process batches sequentially to not overload Ollama
+        all_processed = []
+        for i in range(0, len(articles), BATCH_SIZE):
+            batch = articles[i:i + BATCH_SIZE]
+            processed = await process_batch(http_client, batch)
+            all_processed.extend(processed)
 
-    # Process batches concurrently
-    tasks = []
-    for i in range(0, len(articles), BATCH_SIZE):
-        batch = articles[i:i + BATCH_SIZE]
-        tasks.append(process_batch(client, batch))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    all_processed = []
-    for result in results:
-        if isinstance(result, list):
-            all_processed.extend(result)
     return all_processed
 
 
