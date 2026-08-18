@@ -106,7 +106,7 @@ class NewsCache:
                     self.last_update = time.time()
                     logger.info(f"News updated: {len(new_articles)} articles")
                 else:
-                    logger.warning("Claude returned no articles, keeping old data")
+                    logger.warning("Ollama returned no articles, keeping old data")
                     if self.articles:
                         self.last_update = time.time()
         except Exception as e:
@@ -187,18 +187,17 @@ async def fetch_rss_feeds() -> list[dict]:
 
 
 # --- AI Processing (Ollama) ---
-SYSTEM_PROMPT = """Du bist ein Nachrichtenredakteur. Deine Aufgabe:
-1. ENTFERNE alle Artikel die Spekulation enthalten (Konjunktiv wie "könnte", "dürfte", "würde", Phrasen wie "es wird vermutet", "möglicherweise")
-2. ENTFERNE alle Meinungsartikel und Einordnungen
-3. ENTFERNE Duplikate (gleiche Nachricht aus verschiedenen Quellen -> nur einmal, bevorzuge die detailliertere Version)
-4. Schreibe die verbleibenden Nachrichten MIT EIGENEN WORTEN neu:
-   - Neutral und sachlich
-   - Positiv gestimmt (ohne zu verfälschen)
-   - Kurz und prägnant (max 2 Sätze pro Nachricht)
-   - Nur verifizierte Fakten
+SYSTEM_PROMPT = """Du bist ein Nachrichtenredakteur. Du bekommst Artikel mit Titel, Zusammenfassung, Quelle und Link.
 
-Antworte IMMER als JSON-Array mit Objekten: {"headline": "...", "text": "...", "source": "...", "link": "..."}
-Gib NUR das JSON-Array zurück, nichts anderes. Kein Markdown, kein Text drumherum."""
+REGELN:
+1. ENTFERNE Artikel mit Spekulation (Konjunktiv: "könnte", "dürfte", "würde", "möglicherweise", "es wird vermutet")
+2. ENTFERNE Meinungsartikel und Einordnungen
+3. ENTFERNE Duplikate (gleiche Nachricht nur einmal)
+4. Schreibe verbleibende Nachrichten MIT EIGENEN WORTEN neu: neutral, sachlich, positiv gestimmt, max 2 Sätze
+5. BEHALTE die originale Quelle und den originalen Link bei!
+
+WICHTIG: Antworte NUR mit einem JSON-Array. Kein anderer Text. Kein Markdown. Format:
+[{"headline": "Kurze Überschrift", "text": "Ein bis zwei Sätze.", "source": "Originalquelle", "link": "https://original-link"}]"""
 
 
 async def process_batch(http_client: httpx.AsyncClient, articles: list[dict]) -> list[dict]:
@@ -206,9 +205,9 @@ async def process_batch(http_client: httpx.AsyncClient, articles: list[dict]) ->
     if not articles:
         return []
 
-    articles_text = "\n\n---\n\n".join(
-        f"TITEL: {a['title']}\nZUSAMMENFASSUNG: {a['summary']}\nQUELLE: {a['source']}\nLINK: {a['link']}"
-        for a in articles
+    articles_text = "\n\n".join(
+        f"Artikel {i+1}:\nTitel: {a['title']}\nZusammenfassung: {a['summary']}\nQuelle: {a['source']}\nLink: {a['link']}"
+        for i, a in enumerate(articles)
     )
 
     try:
@@ -218,22 +217,26 @@ async def process_batch(http_client: httpx.AsyncClient, articles: list[dict]) ->
                 "model": OLLAMA_MODEL,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Hier sind die Artikel:\n\n{articles_text}"},
+                    {"role": "user", "content": articles_text},
                 ],
                 "stream": False,
-                "options": {"temperature": 0.3},
-                "format": "json",
+                "options": {"temperature": 0.3, "num_predict": 4000},
             },
-            timeout=120,
+            timeout=180,
         )
         response.raise_for_status()
         data = response.json()
         content = data["message"]["content"].strip()
 
-        # Parse JSON - handle both array and wrapped object
+        # Strip markdown code blocks if present
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        # Parse JSON
         parsed = json.loads(content)
+
+        # Handle wrapped objects like {"result": [...]} or {"articles": [...]}
         if isinstance(parsed, dict):
-            # Some models wrap in {"articles": [...]}
             for key in parsed:
                 if isinstance(parsed[key], list):
                     return parsed[key]
