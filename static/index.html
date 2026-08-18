@@ -139,7 +139,7 @@
                     status.innerHTML = '<span class="spinner"></span>Nachrichten werden im Hintergrund geladen...';
                     loading = false;
                     waitingForData = true;
-                    setTimeout(loadPage, 3000);  // Retry in 3s
+                    setTimeout(loadPage, 10000);  // Retry in 10s
                     return;
                 }
 

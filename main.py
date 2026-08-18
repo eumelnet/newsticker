@@ -17,6 +17,7 @@ from slowapi.errors import RateLimitExceeded
 from contextlib import asynccontextmanager
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("newsticker")
 
 # --- Config ---
@@ -95,11 +96,11 @@ class NewsCache:
             ).hexdigest()
 
             if new_hash == self.content_hash and self.articles:
-                logger.info("RSS content unchanged, skipping Claude API call")
+                logger.info("RSS content unchanged, skipping Ollama")
                 self.last_update = time.time()
             else:
-                logger.info(f"RSS content changed, processing {len(articles)} articles with Claude...")
-                new_articles = await process_articles_with_claude(articles)
+                logger.info(f"RSS content changed, processing {len(articles)} articles...")
+                new_articles = await process_articles_incrementally(articles, self)
                 if new_articles:
                     self.articles = new_articles
                     self.content_hash = new_hash
@@ -247,15 +248,24 @@ async def process_batch(http_client: httpx.AsyncClient, articles: list[dict]) ->
         return []
 
 
-async def process_articles_with_claude(articles: list[dict]) -> list:
-    """Filter with Ollama in batches."""
+async def process_articles_incrementally(articles: list[dict], cache_ref) -> list:
+    """Process articles batch by batch, updating cache after each batch."""
+    all_processed = []
     async with httpx.AsyncClient() as http_client:
-        # Process batches sequentially to not overload Ollama
-        all_processed = []
         for i in range(0, len(articles), BATCH_SIZE):
             batch = articles[i:i + BATCH_SIZE]
+            batch_num = i // BATCH_SIZE + 1
+            total_batches = -(-len(articles) // BATCH_SIZE)
+            logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} articles)...")
+
             processed = await process_batch(http_client, batch)
             all_processed.extend(processed)
+            logger.info(f"Batch {batch_num} done: {len(processed)} articles kept")
+
+            # Update cache incrementally so frontend can show results immediately
+            if all_processed:
+                cache_ref.articles = all_processed
+                cache_ref.last_update = time.time()
 
     return all_processed
 
